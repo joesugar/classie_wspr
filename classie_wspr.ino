@@ -1,4 +1,3 @@
-#include "bitlash.h"
 #include "si5351.h"
 #include "Wire.h"
 
@@ -9,7 +8,7 @@
  *
  * Basic controller for the Classie WSPR transceiver.
  *
- * This program is placed in the public domain and is distribute
+ * This program is placed in the public domain and is distributed
  * in the hope that it will be useful but WITHOUT ANY WARRANTY, 
  * even the implied warranty of MERCHANTABILITY or FITNESS FOR 
  * A PARTICULAR PURPOSE.
@@ -80,10 +79,6 @@ uint32 transmitTimer = 0;
 uint32 deltaTransmitTimer = 0;
 uint16 transmitAcc = 0;
 
-uint16 transmitPercentage = 0;
-uint32 transmitFreq = 0;
-uint32 receiveFreq = 0;
-
 uint32 transmitStartTimer = 0;
 uint8  transmitState = WAIT_FOR_TRANSMIT_TIMEOUT;
 
@@ -148,12 +143,13 @@ void setup()
     /* Initialize variables.
      */
     lastTime = millis();
-    receiveFreq = RX_FREQ;
-    transmitFreq = TX_FREQ;
-    transmitPercentage = TRANSMIT_PERCENTAGE;
     transmitState = WAIT_FOR_TRANSMIT_TIMEOUT;
     transmitTimer = TRANSMIT_PERIOD_NUMBER - RESET_DELAY;
     transmitAcc = 0;     
+    
+    /* Configure the A2D
+     */
+    configureA2D();
     
     /* Initialize the output pins.
      */
@@ -161,21 +157,13 @@ void setup()
     pinMode(LED, OUTPUT);
     ENABLE_RECEIVE;
     ENABLE_RECEIVE_LED;
-
-#ifdef INCLUDE_BITLASH_FUNC     
-    /* Initialize bitlash
-     */
-    initBitlash(57600);
-    addBitlashFunction("xmit_perc", TransmitPercentage);
-    addBitlashFunction("xmit_freq", TransmitFrequency);
-#endif
     
     /* Initialize the Si5351
      */
     si5351.init(SI5351_CRYSTAL_LOAD_8PF);
     si5351.drive_strength(SI5351_CLK2, SI5351_DRIVE_2MA);
     
-    /* Set default frequencies.
+    /* Enable/disable the clocks.
      */
     si5351.set_correction(-391);
     si5351.clock_enable(SI5351_CLK0, 0);
@@ -184,20 +172,24 @@ void setup()
     
     /* Start in receive mode.
      */
-    ENABLE_RECEIVE_LED;
     SetFrequency(RX_FREQ, POWER_DOWN);
+}
+
+/* Interrupt servicing routine.
+ * Called when a new ADC value is ready.
+ */
+uint8 newData = 0;
+ISR(ADC_vect) 
+{
+    /* Get value from A0.
+     */
+    newData = ADCH;
 }
 
 /* WSPR main loop.
  */
 void loop()
 {
-    /* Run the bitlash function
-     */
-#ifdef INCLUDE_BITLASH_FUNC      
-    runBitlash();
-#endif
-    
     /* Update the values used to track time.
      */
     currentTime = millis();
@@ -237,7 +229,7 @@ void loop()
                  * delay before transmission.
                  */
                 ENABLE_TRANSMIT_LED;
-                SetFrequencyList(transmitFreq);
+                SetFrequencyList(TX_FREQ);
                 transmitStartTimer = ONE_SECOND;
                 transmitState = WAIT_FOR_TRANSMIT_START;
             }
@@ -294,6 +286,54 @@ void loop()
     }
 }
 
+/* Configure the A2D
+ */
+void configureA2D()
+{
+    /* Configure for using the A2D
+     * Disable the interrupts.
+     */
+    cli();
+    
+    /* Continuous sampling of analog pin 0
+     */
+    ADCSRA = 0;
+    ADCSRB = 0;
+    
+    /* Set the reference voltage.
+     */
+    ADMUX |= (1 << REFS0); //set reference voltage
+    
+    /* Left align the ADC value- so we can read highest 
+     * 8 bits from ADCH register only
+     */
+    ADMUX |= (1 << ADLAR);
+  
+    /* Set ADC clock with 32 prescaler- 8mHz/32=250kHz
+     */
+    ADCSRA |= (1 << ADPS2) | (1 << ADPS0); 
+    
+    /* Enable auto trigger
+     */
+    ADCSRA |= (1 << ADATE); 
+    
+    /* Enable interrupts when measurement complete
+     */
+    ADCSRA |= (1 << ADIE); 
+    
+    /* Enable ADC
+     */
+    ADCSRA |= (1 << ADEN);
+    
+    /* Start ADC measurements
+     */
+    ADCSRA |= (1 << ADSC);
+  
+    /* Enable interrupts
+     */
+    sei();
+}
+    
 /* Update the transmit start timer.
  */
 uint8 UpdateTransmitStartTimer(uint32 *transmitStartTimer, uint32 deltaStartTimer)
@@ -347,7 +387,7 @@ uint8 SetTransmitFlag(uint16 *transmitAcc)
 
     /* Check to see if the next period should be for transmitting.
      */
-    *transmitAcc += transmitPercentage;
+    *transmitAcc += TRANSMIT_PERCENTAGE;
     transmitFlag = (*transmitAcc >= 100);
     if (*transmitAcc >= 100)
         *transmitAcc -= 100;
@@ -383,52 +423,3 @@ void SetFrequency(uint32 frequency, int8 power_up_down)
     else
         ENABLE_RECEIVE;
 }
-
-#ifdef INCLUDE_BITLASH_FUNC 
-
-/* Bitlash functions.
- */
-
-/* Display/set transmit percentage.
- */
-numvar TransmitPercentage()
-{
-    if (getarg(0) > 0)
-    {
-        /* Set the percentage.
-         */
-        uint16 percentage = getarg(1);
-        if (percentage < 0)
-            percentage = 0;
-        if (percentage > 100)
-            percentage = 100;
-        transmitPercentage = percentage;
-    }        
-    
-    Serial.print("Current transmit percentage:  ");       
-    Serial.print(transmitPercentage);
-    Serial.print("\r\n");
-    return (numvar)transmitPercentage;
-}
-
-
-/* Display/set the transmit frequency.
- */
-numvar TransmitFrequency()
-{
-    if (getarg(0) > 0)
-    {
-        /* Set the transmit frequency
-         */
-        uint32 freq = getarg(1);
-        transmitFreq = freq;
-    }
-    Serial.print("Current transmit frequency:  ");
-    Serial.print((int)(transmitFreq / 1000));
-    Serial.print(".");
-    Serial.print((int)(transmitFreq % 1000));
-    Serial.print(" kHz\n");
-    return (numvar)transmitFreq;
-}
-
-#endif
